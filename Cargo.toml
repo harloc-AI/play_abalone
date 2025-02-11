@@ -1,0 +1,20 @@
+[package]
+name = "play_abalone"
+version = "0.1.0"
+edition = "2021"
+exclude = ["target/", "Cargo.lock"]
+authors = ["Harald Locke"]
+description = "Ablone game with GUI"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/harloc-AI/play_abalone"
+repository = "https://github.com/harloc-AI/play_abalone"
+readme = "README.md"
+keywords = ["game", "Abalone"]
+categories = ["games"]
+
+[dependencies]
+rustai_abalone = { path = "C:\\Users\\hlocke\\Documents\\priv_repos\\rustai_abalone" }
+eframe = "0.30"
+epaint = "0.30"
+image = "0.25"
+crossbeam-channel = "0.5"
