@@ -2,8 +2,9 @@ mod coloring;
 mod constants;
 mod positions;
 mod labels;
+mod player_setting;
 
-use rustai_abalone::game::{AbaloneGame, Coord, MarbleMove, Board, BELGIAN_DAISY, EMPTY_BOARD};
+use rustai_abalone::game::{AbaloneGame, Coord, MarbleMove, Board, BELGIAN_DAISY, EMPTY_BOARD, CLASSIC, GERMAN_DAISY};
 use rustai_abalone::player::MagisterLudi;
 use std::collections::HashMap;
 use eframe::egui;
@@ -17,6 +18,7 @@ use coloring::AbaloneColors;
 use constants::{BASE_WIDTH, BASE_HEIGHT, MARBLE_SIZE, DIST_SIZE, VEC_LEN};
 use positions::AbalonePositions;
 use labels::AbaloneLabels;
+use player_setting::PlayerSetting;
 
 fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, image::ImageError> {
     let image = image::ImageReader::open(path)?.decode()?;
@@ -32,7 +34,6 @@ fn load_image_from_path(path: &std::path::Path) -> Result<egui::ColorImage, imag
 enum GUIWindow {
     Start,
     Game,
-    Options
 }
 
 struct AbaloneGUI {
@@ -41,8 +42,8 @@ struct AbaloneGUI {
     current_window: GUIWindow,
     starting_positions: Vec<Board>,
     selected_index: usize,
-    black_ai: bool,
-    white_ai: bool,
+    black_ai: PlayerSetting,
+    white_ai: PlayerSetting,
     /// skull image for dead marbles
     skull_marble: egui::TextureHandle,
     /// black marble image
@@ -73,6 +74,13 @@ impl AbaloneGUI {
     const COL_VALUES: [f32; 9] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
 
     pub fn new(cc: &eframe::CreationContext<'_>, board: Board, mut starting_positions: Vec<Board>) -> Self {
+        let style = egui::Style {
+            visuals: egui::Visuals::dark(),
+            ..egui::Style::default()
+        };
+        cc.egui_ctx.set_style(style);
+        cc.egui_ctx.style_of(egui::Theme::Dark);
+
         let base_path = std::path::Path::new(r"src\images");
         let skull_path = base_path.join("skull.png");
         let black_path = base_path.join("marble_blue.png");
@@ -86,11 +94,11 @@ impl AbaloneGUI {
         }
         let mut gui = Self {
             game: AbaloneGame::new(board),
-            current_window: GUIWindow::Game,
+            current_window: GUIWindow::Start,
             starting_positions,
             selected_index: 0,
-            black_ai: false,
-            white_ai: false,
+            black_ai: PlayerSetting::Human,
+            white_ai: PlayerSetting::Human,
             skull_marble: cc.egui_ctx.load_texture(
                 "skull",
                 load_image_from_path(skull_path.as_path()).unwrap(),
@@ -118,18 +126,15 @@ impl AbaloneGUI {
             worker_sender: wtx,
             worker_receiver: wrx,
         };
-        gui.game_painter_vectors();
-        gui.worker_thread();
+        gui.start_painter_vectors();
         gui
     }
 
     fn perform_move(&mut self, mut next_state: Board) {
         // clear possible moves
         self.move_states.clear();
-        self.game.differences_to_state(next_state, &mut self.pos.color_selection);
+        let move_circles = self.game.differences_to_state(next_state);
         let was_black_last = self.game.get_black_tomove();
-        // is this the best solution?
-        let move_circles: Vec<Coord> = self.pos.color_selection.iter().map(|coord| coord.clone()).collect();
         
         // deselect / decolorize selected marbles after performing a move
         self.pos.color_selection.clear();
@@ -244,7 +249,7 @@ impl AbaloneGUI {
         }
     }
 
-    fn start_painer_vectors(&mut self) {
+    fn start_painter_vectors(&mut self) {
         let start_pos = self.starting_positions[self.selected_index];
         let (blacks, whites, empties) = AbaloneGame::coords_by_type(start_pos);
 
@@ -328,12 +333,8 @@ impl AbaloneGUI {
         // this only works from an initial position
         // chose parameters?
         let mut is_blacksmove = self.game.get_black_tomove();
-        let mut black_magister = if self.black_ai {
-            Some(MagisterLudi::new(self.game.get_state(), None, 40, 20, 7, 0))
-        } else {None};
-        let mut white_magister = if self.white_ai {
-            Some(MagisterLudi::new(self.game.get_state(), None, 40, 20, 7, 0))
-        } else {None};
+        let mut black_magister = self.create_player(true);
+        let mut white_magister = self.create_player(false);
         let g_recveiver = self.gui_receiver.clone();
         let w_sender = self.worker_sender.clone();
         let sleep_time = time::Duration::from_millis(10);
@@ -389,6 +390,17 @@ impl AbaloneGUI {
         }));
     }
 
+    fn create_player(&self, for_black: bool) -> Option<MagisterLudi> {
+        let player_set = if for_black {&self.black_ai} else {&self.white_ai};
+        let player_inst = match player_set {
+            PlayerSetting::Human => None,
+            PlayerSetting::MagisterLudiAI { mcts_num, mcts_parallel, mcts_minimum, mcts_depth } => {
+                Some(MagisterLudi::new(self.game.get_state(), None, *mcts_num, *mcts_parallel, *mcts_minimum, *mcts_depth))
+            }
+        };
+        player_inst
+    }
+
     fn start_window(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             
@@ -424,36 +436,112 @@ impl AbaloneGUI {
 
             // left and right switch button for position
             let button_id = egui::TextureId::from(&self.nomove_marble);
-            let left_pos = Self::coord_to_center(Coord::new(6, 0));
+            let left_pos = pos2(BASE_WIDTH-2.0*DIST_SIZE, BASE_HEIGHT+5.0*MARBLE_SIZE);
             if ui.put(
                 egui::Rect::from_center_size(
                     left_pos, Vec2::new(MARBLE_SIZE, MARBLE_SIZE)),
                 egui::ImageButton::new(
-                    (button_id, Vec2::new(MARBLE_SIZE, MARBLE_SIZE)))
+                    (button_id, Vec2::new(MARBLE_SIZE, MARBLE_SIZE))).frame(false)
             ).clicked() {
                 if self.selected_index == 0 {
                     self.selected_index = self.starting_positions.len() - 1;
                 } else {
                     self.selected_index -= 1;
                 }
-                self.start_painer_vectors();
+                self.start_painter_vectors();
             };
             painter.arrow(left_pos, vec2(-VEC_LEN, 0.0), Stroke{width: 3.0, color: Color32::BLACK});
-            let right_pos = Self::coord_to_center(Coord::new(6, 10));
+            let right_pos = pos2(BASE_WIDTH+8.0*DIST_SIZE, BASE_HEIGHT+5.0*MARBLE_SIZE);
             if ui.put(
                 egui::Rect::from_center_size(
                     right_pos, Vec2::new(MARBLE_SIZE, MARBLE_SIZE)),
                 egui::ImageButton::new(
-                    (button_id, Vec2::new(MARBLE_SIZE, MARBLE_SIZE)))
+                    (button_id, Vec2::new(MARBLE_SIZE, MARBLE_SIZE))).frame(false)
             ).clicked() {
                 self.selected_index += 1;
                 if self.selected_index == self.starting_positions.len() {
                     self.selected_index = 0;
                 }
-                self.start_painer_vectors();
+                self.start_painter_vectors();
             };
             painter.arrow(right_pos, vec2(VEC_LEN, 0.0), Stroke{width: 3.0, color: Color32::BLACK});
+
+            ui.end_row();
+            // standard stuff up here
+            let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(
+                egui::Rect::from_min_max(
+                    pos2(0.0, 700.0), 
+                    pos2(1200.0, 1000.0)
+                )
+            ));
+            egui::Grid::new("game_settings")
+                .num_columns(10)
+                .min_col_width(100.0)
+                .show(&mut child_ui, |cui| {
+                    // first row, two buttons, start & end game
+                    cui.label("");
+                    cui.label("");
+                    let start = self.add_another_button(cui, "Start Game!".to_string());
+                    if start.clicked() {
+                        // just be sure, that the old thread is stopped
+                        self.stop_worker();
+                        self.worker_thread();
+                        self.game = AbaloneGame::new(self.starting_positions[self.selected_index]);
+                        self.game_painter_vectors();
+                        self.current_window = GUIWindow::Game;
+                    }
+                    self.add_exit_button(cui);
+                    cui.end_row();
+
+                    // second row black player settings
+                    cui.label("Blue Player");
+                    cui.add(egui::TextEdit::singleline(&mut self.glabels.black_name).hint_text("player name"));
+                    self.start_player_options(cui, true);
+                    cui.end_row();
+                    cui.label("Yellow Player");
+                    cui.add(egui::TextEdit::singleline(&mut self.glabels.white_name).hint_text("player name"));
+                    self.start_player_options(cui, false);
+                    cui.end_row();
+            });
         });
+    }
+
+    fn start_player_options(&mut self, ui: &mut egui::Ui, for_black: bool) {
+        let id_salt = if for_black {"black"} else {"white"};
+        let player_set = if for_black {&mut self.black_ai} else {&mut self.white_ai};
+        let selec_text = match player_set {
+            PlayerSetting::Human => "Human Player",
+            PlayerSetting::MagisterLudiAI { mcts_num: _, mcts_parallel: _, mcts_minimum: _, mcts_depth: _ } => "Magister Ludi AI"
+        };
+        egui::ComboBox::new(id_salt, "Player type")
+            .selected_text(selec_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    player_set,
+                    PlayerSetting::Human,
+                    "Human player");
+                ui.selectable_value(
+                    player_set,
+                    PlayerSetting::MagisterLudiAI { mcts_num: 200, mcts_parallel: 12, mcts_minimum: 7, mcts_depth: 0 },
+                    "Magister Ludi AI");
+            });
+        match player_set {
+            PlayerSetting::Human => {},
+            PlayerSetting::MagisterLudiAI { mcts_num, mcts_parallel, mcts_minimum, mcts_depth } => {
+                (
+                    ui.label("simulations:") | ui.add(egui::DragValue::new(mcts_num).speed(10).range(100..=1000))
+                ).on_hover_text("The number of simulation the 'Magister Ludi' AI will perform to determine a move");
+                (
+                    ui.label("threads:") | ui.add(egui::DragValue::new(mcts_parallel).speed(1).range(1..=50))
+                ).on_hover_text("The number of threads created for the 'Magister Ludi' AI.");
+                (
+                    ui.label("minimum:") | ui.add(egui::DragValue::new(mcts_minimum).speed(1).range(1..=20))
+                ).on_hover_text("The minimum number every selected position will be simulated");
+                (
+                    ui.label("depth:") | ui.add(egui::DragValue::new(mcts_depth).speed(1).range(0..=100))
+                ).on_hover_text("The number of moves that will be performed for each simulation. depth = 0 means unlimited depth");
+            }
+        }
     }
 
     fn game_window(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -527,7 +615,7 @@ impl AbaloneGUI {
             }
             // paint clickable images for color selection
             // check whether the current player is an AI-player or if the game has already ended
-            let is_active = if is_blacksmove {!self.black_ai} else {!self.white_ai} && !is_ended;
+            let is_active = if is_blacksmove {self.black_ai == PlayerSetting::Human} else {self.white_ai == PlayerSetting::Human} && !is_ended;
             let mut selected_next_state: Option<Board> = None;
             let mut selected_coord: Option<Coord> = None;
             if is_active {
@@ -585,13 +673,26 @@ impl AbaloneGUI {
             }
             ui.end_row();
             // standard stuff up here
-
-            let quit = self.add_another_button(ui, "Quit".to_string());
-            if quit.clicked() {
-                self.stop_worker();
-                self.current_window = GUIWindow::Start;
-            }
-            ui.end_row();
+            let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(
+                egui::Rect::from_min_max(
+                    pos2(0.0, 700.0), 
+                    pos2(1200.0, 1000.0)
+                )
+            ));
+            egui::Grid::new("exit_buttons")
+                .num_columns(6)
+                .min_col_width(200.0)
+                .start_row(2)
+                .show(&mut child_ui, |cui| {
+                    let quit = self.add_another_button(cui, "Quit".to_string());
+                    if quit.clicked() {
+                        self.stop_worker();
+                        self.start_painter_vectors();
+                        self.current_window = GUIWindow::Start;
+                    }
+                    self.add_exit_button(cui);
+                    cui.end_row();
+            });
 
             // handle clicks
             match selected_coord {
@@ -603,12 +704,6 @@ impl AbaloneGUI {
                 Some(n) => self.perform_move(n),
                 _ => {}
             }
-        });
-    }
-
-    fn option_window(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.add_exit_button(ui);
         });
     }
 
@@ -642,8 +737,7 @@ impl eframe::App for AbaloneGUI {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         match self.current_window {
             GUIWindow::Start => self.start_window(ctx, frame),
-            GUIWindow::Game => self.game_window(ctx, frame),
-            GUIWindow::Options => self.option_window(ctx, frame),
+            GUIWindow::Game => self.game_window(ctx, frame)
         }
     }
 
@@ -661,12 +755,7 @@ fn main() {
         "Play Abalone",
         native_options,
         Box::new(|cc| {
-            let style = egui::Style {
-                visuals: egui::Visuals::dark(),
-                ..egui::Style::default()
-            };
-            cc.egui_ctx.set_style(style);
-            Ok(Box::new(AbaloneGUI::new(cc, BELGIAN_DAISY, vec![])))
+            Ok(Box::new(AbaloneGUI::new(cc, BELGIAN_DAISY, vec![BELGIAN_DAISY, GERMAN_DAISY, CLASSIC])))
         }),
     );
 }
